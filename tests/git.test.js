@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { getGitStatus, parseNumstat, parseStatus } from '../dist/git.js';
 
-const IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@test.com', '-c', 'commit.gpgsign=false'];
+const IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@test.com', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false'];
 
 async function withRepo(fn, { commit = true } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'claude-hud-git-'));
@@ -98,6 +98,28 @@ test('getGitStatus attaches line diffs, including to renamed and unusually named
     assert.deepEqual(status?.lineDiff, { added: 4, deleted: 0 });
     const byPath = Object.fromEntries(status.fileStats.trackedFiles.map((file) => [file.fullPath, file.lineDiff]));
     assert.deepEqual(byPath, { 'renamed.txt': { added: 1, deleted: 0 }, [odd]: { added: 3, deleted: 0 } });
+  });
+});
+
+test('getGitStatus line diffs never rewrite the index', async () => {
+  await withRepo(async ({ dir, git, write }) => {
+    await write('a.txt', 'a\n');
+    await write('b.txt', 'b\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'files');
+    // b.txt gets a new mtime but the same content: stale stat data that porcelain `git diff`
+    // would refresh into .git/index under index.lock.
+    const old = new Date('2020-01-01T00:00:00Z');
+    await utimes(path.join(dir, 'b.txt'), old, old);
+    git('update-index', '--refresh');
+    await utimes(path.join(dir, 'b.txt'), new Date(), new Date());
+    await write('a.txt', 'a\nb\n');
+    const index = path.join(dir, '.git', 'index');
+    const before = await readFile(index);
+
+    const status = await getGitStatus(dir, { lineDiffs: true });
+    assert.deepEqual(status?.lineDiff, { added: 1, deleted: 0 });
+    assert.deepEqual(await readFile(index), before);
   });
 });
 
