@@ -29,7 +29,10 @@ export async function getGitStatus(cwd, options = {}) {
     status.fileStats = parsed.fileStats;
     if (options.lineDiffs) {
         try {
-            const diffs = parseNumstat(await runGit(cwd, [...QUIET, 'diff', '--numstat', '-z', 'HEAD'], 2000));
+            // diff-index, not diff: porcelain diff refreshes stale stat data into .git/index whatever
+            // --no-optional-locks says, and a timeout mid-write leaves .git/index.lock behind.
+            // -M keeps the rename detection diff turns on by default.
+            const diffs = parseNumstat(await runGit(cwd, [...QUIET, 'diff-index', '-M', '--numstat', '-z', 'HEAD'], 2000));
             status.lineDiff = { added: 0, deleted: 0 };
             for (const diff of diffs.values()) {
                 status.lineDiff.added += diff.added;
@@ -42,7 +45,7 @@ export async function getGitStatus(cwd, options = {}) {
             }
         }
         catch (err) {
-            debug('git diff --numstat failed:', err instanceof Error ? err.message : err);
+            debug('git diff-index --numstat failed:', err instanceof Error ? err.message : err);
         }
     }
     return status;
