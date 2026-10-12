@@ -281,10 +281,11 @@ test('getGitStatus keeps filters from the user\'s own config, such as git-lfs', 
   skip: process.platform === 'win32' ? 'needs a POSIX filter command' : false,
 }, async () => {
   await withRepo(async ({ dir, git, write }) => {
-    await commitStale(dir, git, write, '*.bin filter=lfs\n', ['a.bin']);
+    // Not named lfs: a machine with git-lfs installed has a system-wide filter.lfs.process, which wins over clean.
+    await commitStale(dir, git, write, '*.bin filter=mine\n', ['a.bin']);
     await withGlobalConfig({}, async (globalDir) => {
       const marker = path.join(globalDir, 'ran');
-      writeConfig(process.env.GIT_CONFIG_GLOBAL, { 'filter.lfs.clean': `sh -c 'touch "${marker}"; cat'` });
+      writeConfig(process.env.GIT_CONFIG_GLOBAL, { 'filter.mine.clean': `sh -c 'touch "${marker}"; cat'` });
       await getGitStatus(dir, { lineDiffs: true });
       assert.equal(await exists(marker), true);
     });
