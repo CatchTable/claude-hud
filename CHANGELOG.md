@@ -4,6 +4,14 @@ All notable changes to Claude HUD will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-12
+
+### Security
+- Git status no longer runs commands that a repository's own config names. A directory whose `.git/config` (or a file it includes, or a submodule's config) set `core.fsmonitor` or a filter driver could run any command as you on every render ([GHSA-fq7j-8hxj-jfqh](https://github.com/jarrodwatts/claude-hud/security/advisories/GHSA-fq7j-8hxj-jfqh)). Filters from your global or system config, such as git-lfs, still run.
+
+### Changed
+- Uncommitted changes inside a submodule no longer mark the repository dirty; a submodule moved to a new commit still does.
+
 ## [0.11.0] - 2026-10-12
 
 ### Added
