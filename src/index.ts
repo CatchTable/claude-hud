@@ -15,6 +15,7 @@ import { readAuthInfo } from "./auth.js";
 import { getCostTotals } from "./daily-cost.js";
 import { getOutputSpeed } from "./speed.js";
 import { resolveUsage, writeExternalUsageSnapshot } from "./external-usage.js";
+import { getUsage } from "./usage-api.js";
 import { setLanguage, t } from "./i18n/index.js";
 import type { StdinData, TranscriptData } from "./types.js";
 
@@ -88,7 +89,7 @@ export async function main(): Promise<void> {
     if (display.externalUsageWritePath && stdinUsage) {
       writeExternalUsageSnapshot(config, stdinUsage, now);
     }
-    const usageData = display.showUsage ? resolveUsage(config, stdinUsage, now) : null;
+    const usageData = display.showUsage ? (resolveUsage(config, stdinUsage, now) ?? (await getUsage())) : null;
 
     render({
       stdin,
