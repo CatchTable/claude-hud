@@ -1,4 +1,5 @@
-import { readStdin, getUsageFromStdin } from './stdin.js';
+import { readStdin } from './stdin.js';
+import { getUsage } from './usage-api.js';
 import { parseTranscript } from './transcript.js';
 import { render } from './render/index.js';
 import { countConfigs } from './config-reader.js';
@@ -9,7 +10,7 @@ import { getClaudeCodeVersion } from './version.js';
 import { getMemoryUsage } from './memory.js';
 export type MainDeps = {
     readStdin: typeof readStdin;
-    getUsageFromStdin: typeof getUsageFromStdin;
+    getUsage: typeof getUsage;
     parseTranscript: typeof parseTranscript;
     countConfigs: typeof countConfigs;
     getGitStatus: typeof getGitStatus;

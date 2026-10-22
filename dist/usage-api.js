@@ -10,28 +10,22 @@ import { createDebug } from './debug.js';
 import { getClaudeConfigDir, getHudPluginDir } from './claude-config-dir.js';
 const debug = createDebug('usage');
 const LEGACY_KEYCHAIN_SERVICE_NAME = 'Claude Code-credentials';
-// File-based cache (HUD runs as new process each render, so in-memory cache won't persist)
-const CACHE_TTL_MS = 5 * 60_000; // 5 minutes — matches Anthropic usage API rate limit window
-const CACHE_FAILURE_TTL_MS = 15_000; // 15 seconds for failed requests
-const CACHE_RATE_LIMITED_BASE_MS = 60_000; // 60s base for 429 backoff
-const CACHE_RATE_LIMITED_MAX_MS = 5 * 60_000; // 5 min max backoff
+const CACHE_TTL_MS = 5 * 60_000;
+const CACHE_FAILURE_TTL_MS = 15_000;
+const CACHE_RATE_LIMITED_BASE_MS = 60_000;
+const CACHE_RATE_LIMITED_MAX_MS = 5 * 60_000;
 const CACHE_LOCK_STALE_MS = 30_000;
 const CACHE_LOCK_WAIT_MS = 2_000;
 const CACHE_LOCK_POLL_MS = 50;
 const KEYCHAIN_TIMEOUT_MS = 3000;
-const KEYCHAIN_BACKOFF_MS = 60_000; // Backoff on keychain failures to avoid re-prompting
+const KEYCHAIN_BACKOFF_MS = 60_000;
 const USAGE_API_TIMEOUT_MS_DEFAULT = 15_000;
 export const USAGE_API_USER_AGENT = 'claude-code/2.1';
-/**
- * Check if user is using a custom API endpoint instead of the default Anthropic API.
- * When using custom providers (e.g., via cc-switch), the OAuth usage API is not applicable.
- */
+const ALLOWED_PROXY_PATTERNS = ['wadcorp', 'catchtable'];
 function isUsingCustomApiEndpoint(env = process.env) {
     const baseUrl = env.ANTHROPIC_BASE_URL?.trim() || env.ANTHROPIC_API_BASE_URL?.trim();
-    // No custom endpoint configured - using default Anthropic API
-    if (!baseUrl) {
+    if (!baseUrl)
         return false;
-    }
     try {
         return new URL(baseUrl).origin !== 'https://api.anthropic.com';
     }
@@ -39,15 +33,19 @@ function isUsingCustomApiEndpoint(env = process.env) {
         return true;
     }
 }
+// Per-account file suffix: profiles that share plugins/ via symlink (claude-account) must not share usage state.
+// Default ~/.claude keeps the legacy file names.
+function getAccountFileSuffix(homeDir) {
+    const serviceName = getKeychainServiceName(getClaudeConfigDir(homeDir), homeDir);
+    return serviceName.slice(LEGACY_KEYCHAIN_SERVICE_NAME.length);
+}
 function getCachePath(homeDir) {
-    return path.join(getHudPluginDir(homeDir), '.usage-cache.json');
+    return path.join(getHudPluginDir(homeDir), `.usage-cache${getAccountFileSuffix(homeDir)}.json`);
 }
 function getCacheLockPath(homeDir) {
-    return path.join(getHudPluginDir(homeDir), '.usage-cache.lock');
+    return path.join(getHudPluginDir(homeDir), `.usage-cache${getAccountFileSuffix(homeDir)}.lock`);
 }
 function hydrateCacheData(data) {
-    // JSON.stringify converts Date to ISO string, so we need to reconvert on read.
-    // new Date() handles both Date objects and ISO strings safely.
     if (data.fiveHourResetAt) {
         data.fiveHourResetAt = new Date(data.fiveHourResetAt);
     }
@@ -57,26 +55,20 @@ function hydrateCacheData(data) {
     return data;
 }
 function getRateLimitedTtlMs(count) {
-    // Exponential backoff: 60s, 120s, 240s, capped at 5 min
     return Math.min(CACHE_RATE_LIMITED_BASE_MS * Math.pow(2, Math.max(0, count - 1)), CACHE_RATE_LIMITED_MAX_MS);
 }
 function getRateLimitedRetryUntil(cache) {
-    if (cache.data.apiError !== 'rate-limited') {
+    if (cache.data.apiError !== 'rate-limited')
         return null;
-    }
-    if (cache.retryAfterUntil && cache.retryAfterUntil > cache.timestamp) {
+    if (cache.retryAfterUntil && cache.retryAfterUntil > cache.timestamp)
         return cache.retryAfterUntil;
-    }
     if (cache.rateLimitedCount && cache.rateLimitedCount > 0) {
         return cache.timestamp + getRateLimitedTtlMs(cache.rateLimitedCount);
     }
     return null;
 }
 function withRateLimitedSyncing(data) {
-    return {
-        ...data,
-        apiError: 'rate-limited',
-    };
+    return { ...data, apiError: 'rate-limited' };
 }
 function readCacheState(homeDir, now, ttls) {
     try {
@@ -85,7 +77,6 @@ function readCacheState(homeDir, now, ttls) {
             return null;
         const content = fs.readFileSync(cachePath, 'utf8');
         const cache = JSON.parse(content);
-        // Only serve lastGoodData during rate-limit backoff. Other failures should remain visible.
         const displayData = (cache.data.apiError === 'rate-limited' && cache.lastGoodData)
             ? withRateLimitedSyncing(cache.lastGoodData)
             : cache.data;
@@ -130,19 +121,6 @@ function readLastGoodData(homeDir) {
         return null;
     }
 }
-function readCachedPlanName(homeDir) {
-    try {
-        const cachePath = getCachePath(homeDir);
-        if (!fs.existsSync(cachePath))
-            return null;
-        const content = fs.readFileSync(cachePath, 'utf8');
-        const cache = JSON.parse(content);
-        return cache.data.planName ?? cache.lastGoodData?.planName ?? null;
-    }
-    catch {
-        return null;
-    }
-}
 function readCache(homeDir, now, ttls) {
     const cache = readCacheState(homeDir, now, ttls);
     return cache?.isFresh ? cache.data : null;
@@ -155,15 +133,12 @@ function writeCache(homeDir, data, timestamp, opts) {
             fs.mkdirSync(cacheDir, { recursive: true });
         }
         const cache = { data, timestamp };
-        if (opts?.rateLimitedCount && opts.rateLimitedCount > 0) {
+        if (opts?.rateLimitedCount && opts.rateLimitedCount > 0)
             cache.rateLimitedCount = opts.rateLimitedCount;
-        }
-        if (opts?.retryAfterUntil) {
+        if (opts?.retryAfterUntil)
             cache.retryAfterUntil = opts.retryAfterUntil;
-        }
-        if (opts?.lastGoodData) {
+        if (opts?.lastGoodData)
             cache.lastGoodData = opts.lastGoodData;
-        }
         fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf8');
     }
     catch {
@@ -201,18 +176,16 @@ function tryAcquireCacheLock(homeDir) {
     catch (error) {
         const maybeError = error;
         if (maybeError.code !== 'EEXIST') {
-            debug('Usage cache lock unavailable, continuing without coordination:', maybeError.message);
+            debug('Usage cache lock unavailable:', maybeError.message);
             return 'unsupported';
         }
     }
     const lockTimestamp = readLockTimestamp(lockPath);
-    // Unparseable timestamp — use mtime to distinguish a crash leftover from an active writer.
     if (lockTimestamp === null) {
         try {
             const lockStat = fs.statSync(lockPath);
-            if (Date.now() - lockStat.mtimeMs < CACHE_LOCK_STALE_MS) {
+            if (Date.now() - lockStat.mtimeMs < CACHE_LOCK_STALE_MS)
                 return 'busy';
-            }
         }
         catch {
             return tryAcquireCacheLock(homeDir);
@@ -239,12 +212,11 @@ function tryAcquireCacheLock(homeDir) {
 function releaseCacheLock(homeDir) {
     try {
         const lockPath = getCacheLockPath(homeDir);
-        if (fs.existsSync(lockPath)) {
+        if (fs.existsSync(lockPath))
             fs.unlinkSync(lockPath);
-        }
     }
     catch {
-        // Ignore lock cleanup failures
+        // Ignore
     }
 }
 async function waitForFreshCache(homeDir, now, ttls, timeoutMs = CACHE_LOCK_WAIT_MS) {
@@ -252,12 +224,10 @@ async function waitForFreshCache(homeDir, now, ttls, timeoutMs = CACHE_LOCK_WAIT
     while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, CACHE_LOCK_POLL_MS));
         const cached = readCache(homeDir, now(), ttls);
-        if (cached) {
+        if (cached)
             return cached;
-        }
-        if (!fs.existsSync(getCacheLockPath(homeDir))) {
+        if (!fs.existsSync(getCacheLockPath(homeDir)))
             break;
-        }
     }
     return readCache(homeDir, now(), ttls);
 }
@@ -269,78 +239,69 @@ const defaultDeps = {
     ttls: { cacheTtlMs: CACHE_TTL_MS, failureCacheTtlMs: CACHE_FAILURE_TTL_MS },
 };
 /**
- * Get OAuth usage data from Anthropic API.
- * Returns null if user is an API user (no OAuth credentials) or credentials are expired.
- * Returns { apiUnavailable: true, ... } if API call fails (to show warning in HUD).
- *
- * Uses file-based cache since HUD runs as a new process each render (~300ms).
- * Cache TTL is configurable via usage.cacheTtlSeconds / usage.failureCacheTtlSeconds in config.json
- * (defaults: 60s for success, 15s for failures).
+ * Get usage data. Prefers stdin rate_limits when available (Pro/Max plans on CC v2.1.80+).
+ * Falls back to OAuth API for Enterprise/older CC versions where stdin rate_limits are absent.
  */
 export async function getUsage(overrides = {}) {
     const deps = { ...defaultDeps, ...overrides };
     const now = deps.now();
     const homeDir = deps.homeDir();
-    // Skip usage API if user is using a custom provider
+    // Prefer official rate_limits from Claude Code stdin (v2.1.80+)
+    if (deps.stdinRateLimits) {
+        const rl = deps.stdinRateLimits;
+        const fiveHour = parseRateLimitPercent(rl.five_hour?.used_percentage);
+        const sevenDay = parseRateLimitPercent(rl.seven_day?.used_percentage);
+        if (fiveHour !== null || sevenDay !== null) {
+            debug('Using official stdin rate_limits');
+            return {
+                fiveHour,
+                sevenDay,
+                fiveHourResetAt: parseRateLimitResetAt(rl.five_hour?.resets_at),
+                sevenDayResetAt: parseRateLimitResetAt(rl.seven_day?.resets_at),
+            };
+        }
+    }
+    // Skip usage API if user is using a custom provider (unless it's a company proxy)
     if (isUsingCustomApiEndpoint()) {
-        debug('Skipping usage API: custom API endpoint configured');
-        return null;
+        const baseUrl = (process.env.ANTHROPIC_BASE_URL ?? process.env.ANTHROPIC_API_BASE_URL ?? '').trim();
+        const isCompanyProxy = ALLOWED_PROXY_PATTERNS.some((p) => baseUrl.includes(p));
+        if (!isCompanyProxy) {
+            debug('Skipping usage API: custom API endpoint configured');
+            return null;
+        }
+        debug('Custom endpoint is company proxy — attempting usage API');
     }
-    // Check file-based cache first
+    // Check file-based cache
     const cacheState = readCacheState(homeDir, now, deps.ttls);
-    if (cacheState?.isFresh) {
+    if (cacheState?.isFresh)
         return cacheState.data;
-    }
     let holdsCacheLock = false;
     const lockStatus = tryAcquireCacheLock(homeDir);
     if (lockStatus === 'busy') {
-        if (cacheState) {
+        if (cacheState)
             return cacheState.data;
-        }
         return await waitForFreshCache(homeDir, deps.now, deps.ttls);
     }
     holdsCacheLock = lockStatus === 'acquired';
     try {
         const refreshedCache = readCache(homeDir, deps.now(), deps.ttls);
-        if (refreshedCache) {
+        if (refreshedCache)
             return refreshedCache;
-        }
         const credentials = readCredentials(homeDir, now, deps.readKeychain);
-        if (!credentials) {
+        if (!credentials)
             return null;
-        }
-        const { accessToken, subscriptionType } = credentials;
-        // Determine plan name from subscriptionType
-        let planName = getPlanName(subscriptionType);
-        if (!planName) {
-            // Only fall back to cache when subscriptionType is genuinely missing or
-            // empty after an OAuth refresh. Explicit values like "api" should remain
-            // API users with no usage display.
-            if (!subscriptionType.trim()) {
-                const cached = readCacheState(homeDir, now, deps.ttls);
-                if (cached?.data?.planName) {
-                    planName = cached.data.planName;
-                }
-            }
-            if (!planName) {
-                return null;
-            }
-        }
-        // Fetch usage from API
+        const { accessToken } = credentials;
         const apiResult = await deps.fetchApi(accessToken);
         if (!apiResult.data) {
             const isRateLimited = apiResult.error === 'rate-limited';
             const prevCount = readRateLimitedCount(homeDir);
             const rateLimitedCount = isRateLimited ? prevCount + 1 : 0;
-            const retryAfterUntil = isRateLimited && apiResult.retryAfterSec
-                ? now + apiResult.retryAfterSec * 1000
-                : undefined;
+            const retryAfterUntil = isRateLimited && apiResult.retryAfterSec ? now + apiResult.retryAfterSec * 1000 : undefined;
             const backoffOpts = {
                 rateLimitedCount: isRateLimited ? rateLimitedCount : undefined,
                 retryAfterUntil,
             };
             const failureResult = {
-                planName,
                 fiveHour: null,
                 sevenDay: null,
                 fiveHourResetAt: null,
@@ -351,12 +312,8 @@ export async function getUsage(overrides = {}) {
             if (isRateLimited) {
                 const staleCache = readCacheState(homeDir, now, deps.ttls);
                 const lastGood = readLastGoodData(homeDir);
-                const goodData = (staleCache && !staleCache.data.apiUnavailable)
-                    ? staleCache.data
-                    : lastGood;
+                const goodData = staleCache && !staleCache.data.apiUnavailable ? staleCache.data : lastGood;
                 if (goodData) {
-                    // Preserve the backoff state in cache, but keep rendering the last successful values
-                    // with a syncing hint so stale data is visible to the user.
                     writeCache(homeDir, failureResult, now, { ...backoffOpts, lastGoodData: goodData });
                     return withRateLimitedSyncing(goodData);
                 }
@@ -364,20 +321,11 @@ export async function getUsage(overrides = {}) {
             writeCache(homeDir, failureResult, now, backoffOpts);
             return failureResult;
         }
-        // Parse response - API returns 0-100 percentage directly
-        // Clamp to 0-100 and handle NaN/Infinity
         const fiveHour = parseUtilization(apiResult.data.five_hour?.utilization);
         const sevenDay = parseUtilization(apiResult.data.seven_day?.utilization);
         const fiveHourResetAt = parseDate(apiResult.data.five_hour?.resets_at);
         const sevenDayResetAt = parseDate(apiResult.data.seven_day?.resets_at);
-        const result = {
-            planName,
-            fiveHour,
-            sevenDay,
-            fiveHourResetAt,
-            sevenDayResetAt,
-        };
-        // Write to file cache — also store as lastGoodData for rate-limit resilience
+        const result = { fiveHour, sevenDay, fiveHourResetAt, sevenDayResetAt };
         writeCache(homeDir, result, now, { lastGoodData: result });
         return result;
     }
@@ -386,22 +334,28 @@ export async function getUsage(overrides = {}) {
         return null;
     }
     finally {
-        if (holdsCacheLock) {
+        if (holdsCacheLock)
             releaseCacheLock(homeDir);
-        }
     }
 }
-/**
- * Get path for keychain failure backoff cache.
- * Separate from usage cache to track keychain-specific failures.
- */
-function getKeychainBackoffPath(homeDir) {
-    return path.join(getHudPluginDir(homeDir), '.keychain-backoff');
+// --- Stdin rate_limits parsing (matches upstream getUsageFromStdin logic) ---
+function parseRateLimitPercent(value) {
+    if (value == null)
+        return null;
+    if (!Number.isFinite(value))
+        return null;
+    return Math.round(Math.max(0, Math.min(100, value)));
 }
-/**
- * Check if we're in keychain backoff period (recent failure/timeout).
- * Prevents re-prompting user on every render cycle.
- */
+function parseRateLimitResetAt(value) {
+    if (value == null)
+        return null;
+    const date = value > 1e12 ? new Date(value) : new Date(value * 1000);
+    return isNaN(date.getTime()) ? null : date;
+}
+// --- Keychain & Credentials ---
+function getKeychainBackoffPath(homeDir) {
+    return path.join(getHudPluginDir(homeDir), `.keychain-backoff${getAccountFileSuffix(homeDir)}`);
+}
 function isKeychainBackoff(homeDir, now) {
     try {
         const backoffPath = getKeychainBackoffPath(homeDir);
@@ -414,32 +368,23 @@ function isKeychainBackoff(homeDir, now) {
         return false;
     }
 }
-/**
- * Record keychain failure for backoff.
- */
 function recordKeychainFailure(homeDir, now) {
     try {
         const backoffPath = getKeychainBackoffPath(homeDir);
         const dir = path.dirname(backoffPath);
-        if (!fs.existsSync(dir)) {
+        if (!fs.existsSync(dir))
             fs.mkdirSync(dir, { recursive: true });
-        }
         fs.writeFileSync(backoffPath, String(now), 'utf8');
     }
     catch {
-        // Ignore write failures
+        // Ignore
     }
 }
-/**
- * Determine the macOS Keychain service name for Claude Code credentials.
- * Claude Code uses the default service for ~/.claude and a hashed suffix for custom config directories.
- */
 export function getKeychainServiceName(configDir, homeDir) {
     const normalizedConfigDir = path.normalize(path.resolve(configDir));
     const normalizedDefaultDir = path.normalize(path.resolve(path.join(homeDir, '.claude')));
-    if (normalizedConfigDir === normalizedDefaultDir) {
+    if (normalizedConfigDir === normalizedDefaultDir)
         return LEGACY_KEYCHAIN_SERVICE_NAME;
-    }
     const hash = createHash('sha256').update(normalizedConfigDir).digest('hex').slice(0, 8);
     return `${LEGACY_KEYCHAIN_SERVICE_NAME}-${hash}`;
 }
@@ -481,9 +426,7 @@ export function resolveKeychainCredentials(serviceNames, now, loadService, accou
     let allowGenericFallback = Boolean(accountName);
     for (const serviceName of serviceNames) {
         try {
-            const keychainData = accountName
-                ? loadService(serviceName, accountName)
-                : loadService(serviceName);
+            const keychainData = accountName ? loadService(serviceName, accountName) : loadService(serviceName);
             if (accountName)
                 allowGenericFallback = false;
             const trimmedKeychainData = keychainData.trim();
@@ -491,9 +434,8 @@ export function resolveKeychainCredentials(serviceNames, now, loadService, accou
                 continue;
             const data = JSON.parse(trimmedKeychainData);
             const credentials = parseCredentialsData(data, now);
-            if (credentials) {
+            if (credentials)
                 return { credentials, shouldBackoff: false };
-            }
         }
         catch (error) {
             if (!isMissingKeychainItemError(error)) {
@@ -513,14 +455,12 @@ export function resolveKeychainCredentials(serviceNames, now, loadService, accou
                 continue;
             const data = JSON.parse(keychainData);
             const credentials = parseCredentialsData(data, now);
-            if (credentials) {
+            if (credentials)
                 return { credentials, shouldBackoff: false };
-            }
         }
         catch (error) {
-            if (!isMissingKeychainItemError(error)) {
+            if (!isMissingKeychainItemError(error))
                 shouldBackoff = true;
-            }
         }
     }
     return { credentials: null, shouldBackoff };
@@ -534,19 +474,9 @@ function getKeychainAccountName() {
         return null;
     }
 }
-/**
- * Read credentials from macOS Keychain.
- * Claude Code stores OAuth credentials in the macOS Keychain with profile-specific service names.
- * Returns null if not on macOS or credentials not found.
- *
- * Security: Uses execFileSync with absolute path to avoid shell injection and PATH hijacking.
- */
 function readKeychainCredentials(now, homeDir) {
-    // Only available on macOS
-    if (process.platform !== 'darwin') {
+    if (process.platform !== 'darwin')
         return null;
-    }
-    // Check backoff to avoid re-prompting on every render after a failure
     if (isKeychainBackoff(homeDir, now)) {
         debug('Keychain in backoff period, skipping');
         return null;
@@ -555,39 +485,26 @@ function readKeychainCredentials(now, homeDir) {
         const configDir = getClaudeConfigDir(homeDir);
         const serviceNames = getKeychainServiceNames(configDir, homeDir);
         const accountName = getKeychainAccountName();
-        debug('Trying keychain service names:', serviceNames);
-        if (accountName) {
-            debug('Trying keychain account name:', accountName);
-        }
         const resolved = resolveKeychainCredentials(serviceNames, now, (serviceName, lookupAccountName) => execFileSync('/usr/bin/security', lookupAccountName
             ? ['find-generic-password', '-s', serviceName, '-a', lookupAccountName, '-w']
             : ['find-generic-password', '-s', serviceName, '-w'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: KEYCHAIN_TIMEOUT_MS }), accountName);
-        if (resolved.credentials) {
+        if (resolved.credentials)
             return resolved.credentials;
-        }
-        if (resolved.shouldBackoff) {
+        if (resolved.shouldBackoff)
             recordKeychainFailure(homeDir, now);
-        }
         return null;
     }
     catch (error) {
-        // Security: Only log error message, not full error object (may contain stdout/stderr with tokens)
         const message = error instanceof Error ? error.message : 'unknown error';
         debug('Failed to read from macOS Keychain:', message);
-        // Record failure for backoff to avoid re-prompting
         recordKeychainFailure(homeDir, now);
         return null;
     }
 }
-/**
- * Read credentials from file (legacy method).
- * Older versions of Claude Code stored credentials in {CLAUDE_CONFIG_DIR}/.credentials.json.
- */
 function readFileCredentials(homeDir, now) {
     const credentialsPath = path.join(getClaudeConfigDir(homeDir), '.credentials.json');
-    if (!fs.existsSync(credentialsPath)) {
+    if (!fs.existsSync(credentialsPath))
         return null;
-    }
     try {
         const content = fs.readFileSync(credentialsPath, 'utf8');
         const data = JSON.parse(content);
@@ -598,39 +515,11 @@ function readFileCredentials(homeDir, now) {
         return null;
     }
 }
-function readFileSubscriptionType(homeDir) {
-    const credentialsPath = path.join(getClaudeConfigDir(homeDir), '.credentials.json');
-    if (!fs.existsSync(credentialsPath)) {
-        return null;
-    }
-    try {
-        const content = fs.readFileSync(credentialsPath, 'utf8');
-        const data = JSON.parse(content);
-        const subscriptionType = data.claudeAiOauth?.subscriptionType;
-        const normalizedSubscriptionType = typeof subscriptionType === 'string'
-            ? subscriptionType.trim()
-            : '';
-        if (!normalizedSubscriptionType) {
-            return null;
-        }
-        return normalizedSubscriptionType;
-    }
-    catch (error) {
-        debug('Failed to read file subscriptionType:', error);
-        return null;
-    }
-}
-/**
- * Parse and validate credentials data from either Keychain or file.
- */
 function parseCredentialsData(data, now) {
     const accessToken = data.claudeAiOauth?.accessToken;
     const subscriptionType = data.claudeAiOauth?.subscriptionType ?? '';
-    if (!accessToken) {
+    if (!accessToken)
         return null;
-    }
-    // Check if token is expired (expiresAt is Unix ms timestamp)
-    // Use != null to handle expiresAt=0 correctly (would be expired)
     const expiresAt = data.claudeAiOauth?.expiresAt;
     if (expiresAt != null && expiresAt <= now) {
         debug('OAuth token expired');
@@ -638,35 +527,12 @@ function parseCredentialsData(data, now) {
     }
     return { accessToken, subscriptionType };
 }
-/**
- * Read OAuth credentials, trying macOS Keychain first (Claude Code 2.x),
- * then falling back to file-based credentials (older versions).
- *
- * Token priority: Keychain token is authoritative (Claude Code 2.x stores current token there).
- * SubscriptionType: Can be supplemented from file if keychain lacks it (display-only field).
- */
 function readCredentials(homeDir, now, readKeychain) {
-    // Try macOS Keychain first (Claude Code 2.x)
     const keychainCreds = readKeychain(now, homeDir);
     if (keychainCreds) {
-        if (keychainCreds.subscriptionType) {
-            debug('Using credentials from macOS Keychain');
-            return keychainCreds;
-        }
-        // Keychain has token but no subscriptionType - try to supplement from file
-        const fileSubscriptionType = readFileSubscriptionType(homeDir);
-        if (fileSubscriptionType) {
-            debug('Using keychain token with file subscriptionType');
-            return {
-                accessToken: keychainCreds.accessToken,
-                subscriptionType: fileSubscriptionType,
-            };
-        }
-        // No subscriptionType available - use keychain token anyway
-        debug('Using keychain token without subscriptionType');
+        debug('Using credentials from macOS Keychain');
         return keychainCreds;
     }
-    // Fall back to file-based credentials (older versions or non-macOS)
     const fileCreds = readFileCredentials(homeDir, now);
     if (fileCreds) {
         debug('Using credentials from file');
@@ -674,42 +540,17 @@ function readCredentials(homeDir, now, readKeychain) {
     }
     return null;
 }
-function getPlanName(subscriptionType) {
-    const lower = subscriptionType.toLowerCase();
-    if (lower.includes('max'))
-        return 'Max';
-    if (lower.includes('pro'))
-        return 'Pro';
-    if (lower.includes('team'))
-        return 'Team';
-    // API users don't have subscriptionType or have 'api'
-    if (!subscriptionType || lower.includes('api'))
-        return null;
-    // Unknown subscription type - show it capitalized
-    return subscriptionType.charAt(0).toUpperCase() + subscriptionType.slice(1);
-}
-export function getUsagePlanNameFallback(homeDir = os.homedir()) {
-    const subscriptionType = readFileSubscriptionType(homeDir);
-    if (subscriptionType) {
-        return getPlanName(subscriptionType);
-    }
-    const cachedPlanName = readCachedPlanName(homeDir);
-    return cachedPlanName ?? null;
-}
-/** Parse utilization value, clamping to 0-100 and handling NaN/Infinity */
 function parseUtilization(value) {
     if (value == null)
         return null;
     if (!Number.isFinite(value))
-        return null; // Handles NaN and Infinity
+        return null;
     return Math.round(Math.max(0, Math.min(100, value)));
 }
-/** Parse ISO date string safely, returning null for invalid dates */
 function parseDate(dateStr) {
     if (!dateStr)
         return null;
     const date = new Date(dateStr);
-    // Check for Invalid Date
     if (isNaN(date.getTime())) {
         debug('Invalid date string:', dateStr);
         return null;
@@ -749,12 +590,7 @@ export function getProxyUrl(hostname, env = process.env) {
         debug('Proxy bypassed by NO_PROXY for host:', hostname);
         return null;
     }
-    const proxyEnv = env.HTTPS_PROXY
-        ?? env.https_proxy
-        ?? env.ALL_PROXY
-        ?? env.all_proxy
-        ?? env.HTTP_PROXY
-        ?? env.http_proxy;
+    const proxyEnv = env.HTTPS_PROXY ?? env.https_proxy ?? env.ALL_PROXY ?? env.all_proxy ?? env.HTTP_PROXY ?? env.http_proxy;
     if (!proxyEnv)
         return null;
     try {
@@ -776,7 +612,7 @@ function createProxyTunnelAgent(proxyUrl) {
     const proxyAuth = proxyUrl.username
         ? `Basic ${Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password || '')}`).toString('base64')}`
         : null;
-    return new class extends https.Agent {
+    return new (class extends https.Agent {
         createConnection(options, callback) {
             const targetHost = String(options.host ?? options.hostname ?? 'localhost');
             const targetPort = Number(options.port) || 443;
@@ -790,17 +626,11 @@ function createProxyTunnelAgent(proxyUrl) {
             const proxySocket = proxyUrl.protocol === 'https:'
                 ? tls.connect({ host: proxyHost, port: proxyPort, servername: proxyHost })
                 : net.connect(proxyPort, proxyHost);
-            proxySocket.once('error', (error) => {
-                settle(error, proxySocket);
-            });
+            proxySocket.once('error', (error) => settle(error, proxySocket));
             proxySocket.once('connect', () => {
-                const connectHeaders = [
-                    `CONNECT ${targetHost}:${targetPort} HTTP/1.1`,
-                    `Host: ${targetHost}:${targetPort}`,
-                ];
-                if (proxyAuth) {
+                const connectHeaders = [`CONNECT ${targetHost}:${targetPort} HTTP/1.1`, `Host: ${targetHost}:${targetPort}`];
+                if (proxyAuth)
                     connectHeaders.push(`Proxy-Authorization: ${proxyAuth}`);
-                }
                 connectHeaders.push('', '');
                 proxySocket.write(connectHeaders.join('\r\n'));
                 let responseBuffer = Buffer.alloc(0);
@@ -821,30 +651,15 @@ function createProxyTunnelAgent(proxyUrl) {
                     const tlsSocket = tls.connect({
                         socket: proxySocket,
                         servername: String(options.servername ?? targetHost),
-                        rejectUnauthorized: getProxyTunnelRejectUnauthorized(options.rejectUnauthorized),
-                    }, () => {
-                        settle(null, tlsSocket);
-                    });
-                    tlsSocket.once('error', (error) => {
-                        settle(error, tlsSocket);
-                    });
+                        rejectUnauthorized: options.rejectUnauthorized !== false,
+                    }, () => settle(null, tlsSocket));
+                    tlsSocket.once('error', (error) => settle(error, tlsSocket));
                 };
                 proxySocket.on('data', onData);
             });
-            // Must not return the socket here. In Node.js _http_agent.js, createSocket()
-            // calls: `if (newSocket) oncreate(null, newSocket)` — returning a truthy value
-            // causes the HTTP request to be written to the raw proxy socket immediately,
-            // before the CONNECT tunnel is established. Only deliver the final TLS socket
-            // asynchronously via the callback after the CONNECT handshake succeeds.
             return undefined;
         }
-    }();
-}
-export function getProxyTunnelRejectUnauthorized(rejectUnauthorized, env = process.env) {
-    if (rejectUnauthorized === false) {
-        return false;
-    }
-    return env.NODE_TLS_REJECT_UNAUTHORIZED !== '0';
+    })();
 }
 function fetchUsageApi(accessToken) {
     return new Promise((resolve) => {
@@ -856,34 +671,23 @@ function fetchUsageApi(accessToken) {
             path: '/api/oauth/usage',
             method: 'GET',
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                Authorization: `Bearer ${accessToken}`,
                 'anthropic-beta': 'oauth-2025-04-20',
                 'User-Agent': USAGE_API_USER_AGENT,
             },
             timeout: timeoutMs,
             agent: proxyUrl ? createProxyTunnelAgent(proxyUrl) : undefined,
         };
-        if (proxyUrl) {
+        if (proxyUrl)
             debug('Using proxy for usage API:', proxyUrl.origin);
-        }
         const req = https.request(options, (res) => {
             let data = '';
-            res.on('data', (chunk) => {
-                data += chunk.toString();
-            });
+            res.on('data', (chunk) => (data += chunk.toString()));
             res.on('end', () => {
                 if (res.statusCode !== 200) {
                     debug('API returned non-200 status:', res.statusCode);
-                    // Use a distinct error key for 429 so cache/render can handle it specially
-                    const error = res.statusCode === 429
-                        ? 'rate-limited'
-                        : res.statusCode ? `http-${res.statusCode}` : 'http-error';
-                    const retryAfterSec = res.statusCode === 429
-                        ? parseRetryAfterSeconds(res.headers['retry-after'])
-                        : undefined;
-                    if (retryAfterSec) {
-                        debug('Retry-After:', retryAfterSec, 'seconds');
-                    }
+                    const error = res.statusCode === 429 ? 'rate-limited' : res.statusCode ? `http-${res.statusCode}` : 'http-error';
+                    const retryAfterSec = res.statusCode === 429 ? parseRetryAfterSeconds(res.headers['retry-after']) : undefined;
                     resolve({ data: null, error, retryAfterSec });
                     return;
                 }
@@ -914,28 +718,23 @@ export function parseRetryAfterSeconds(raw, nowMs = Date.now()) {
     if (!value)
         return undefined;
     const parsedSeconds = Number.parseInt(value, 10);
-    if (Number.isFinite(parsedSeconds) && parsedSeconds > 0) {
+    if (Number.isFinite(parsedSeconds) && parsedSeconds > 0)
         return parsedSeconds;
-    }
     const retryAtMs = Date.parse(value);
-    if (!Number.isFinite(retryAtMs)) {
+    if (!Number.isFinite(retryAtMs))
         return undefined;
-    }
     const retryAfterSeconds = Math.ceil((retryAtMs - nowMs) / 1000);
     return retryAfterSeconds > 0 ? retryAfterSeconds : undefined;
 }
-// Export for testing
 export function clearCache(homeDir) {
     if (homeDir) {
         try {
             const cachePath = getCachePath(homeDir);
-            if (fs.existsSync(cachePath)) {
+            if (fs.existsSync(cachePath))
                 fs.unlinkSync(cachePath);
-            }
             const lockPath = getCacheLockPath(homeDir);
-            if (fs.existsSync(lockPath)) {
+            if (fs.existsSync(lockPath))
                 fs.unlinkSync(lockPath);
-            }
         }
         catch {
             // Ignore

@@ -1,4 +1,5 @@
-import { readStdin, getUsageFromStdin } from './stdin.js';
+import { readStdin } from './stdin.js';
+import { getUsage } from './usage-api.js';
 import { parseTranscript } from './transcript.js';
 import { render } from './render/index.js';
 import { countConfigs } from './config-reader.js';
@@ -12,7 +13,7 @@ import { realpathSync } from 'node:fs';
 export async function main(overrides = {}) {
     const deps = {
         readStdin,
-        getUsageFromStdin,
+        getUsage,
         parseTranscript,
         countConfigs,
         getGitStatus,
@@ -44,10 +45,12 @@ export async function main(overrides = {}) {
         const gitStatus = config.gitStatus.enabled
             ? await deps.getGitStatus(stdin.cwd)
             : null;
-        // Usage comes only from Claude Code's official stdin rate_limits fields.
+        // Usage: prefer stdin rate_limits, fallback to OAuth API for Enterprise
         let usageData = null;
         if (config.display.showUsage !== false) {
-            usageData = deps.getUsageFromStdin(stdin);
+            usageData = await deps.getUsage({
+                stdinRateLimits: stdin.rate_limits ?? undefined,
+            });
         }
         const extraCmd = deps.parseExtraCmdArg();
         const extraLabel = extraCmd ? await deps.runExtraCmd(extraCmd) : null;

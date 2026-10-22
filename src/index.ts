@@ -1,4 +1,5 @@
-import { readStdin, getUsageFromStdin } from './stdin.js';
+import { readStdin } from './stdin.js';
+import { getUsage } from './usage-api.js';
 import { parseTranscript } from './transcript.js';
 import { render } from './render/index.js';
 import { countConfigs } from './config-reader.js';
@@ -13,7 +14,7 @@ import { realpathSync } from 'node:fs';
 
 export type MainDeps = {
   readStdin: typeof readStdin;
-  getUsageFromStdin: typeof getUsageFromStdin;
+  getUsage: typeof getUsage;
   parseTranscript: typeof parseTranscript;
   countConfigs: typeof countConfigs;
   getGitStatus: typeof getGitStatus;
@@ -30,7 +31,7 @@ export type MainDeps = {
 export async function main(overrides: Partial<MainDeps> = {}): Promise<void> {
   const deps: MainDeps = {
     readStdin,
-    getUsageFromStdin,
+    getUsage,
     parseTranscript,
     countConfigs,
     getGitStatus,
@@ -68,10 +69,12 @@ export async function main(overrides: Partial<MainDeps> = {}): Promise<void> {
       ? await deps.getGitStatus(stdin.cwd)
       : null;
 
-    // Usage comes only from Claude Code's official stdin rate_limits fields.
+    // Usage: prefer stdin rate_limits, fallback to OAuth API for Enterprise
     let usageData: RenderContext['usageData'] = null;
     if (config.display.showUsage !== false) {
-      usageData = deps.getUsageFromStdin(stdin);
+      usageData = await deps.getUsage({
+        stdinRateLimits: stdin.rate_limits ?? undefined,
+      });
     }
 
     const extraCmd = deps.parseExtraCmdArg();

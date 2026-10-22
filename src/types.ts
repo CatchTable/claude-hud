@@ -61,7 +61,12 @@ export interface UsageData {
   sevenDay: number | null;  // 0-100 percentage, null if unavailable
   fiveHourResetAt: Date | null;
   sevenDayResetAt: Date | null;
+  apiUnavailable?: boolean; // true if OAuth API call failed
+  apiError?: string; // short error reason (e.g., rate-limited, timeout, 401)
 }
+
+/** Rate limits from stdin — reuse in usage-api.ts */
+export type StdinRateLimits = NonNullable<StdinData['rate_limits']>;
 
 export interface MemoryInfo {
   totalBytes: number;

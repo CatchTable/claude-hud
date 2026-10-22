@@ -1,7 +1,7 @@
 import type { RenderContext } from '../../types.js';
 import { isLimitReached } from '../../types.js';
 import { getProviderLabel } from '../../stdin.js';
-import { critical, label, getQuotaColor, quotaBar, RESET } from '../colors.js';
+import { critical, dim, label, getQuotaColor, quotaBar, RESET } from '../colors.js';
 import { getAdaptiveBarWidth } from '../../utils/terminal.js';
 
 export function renderUsageLine(ctx: RenderContext): string | null {
@@ -73,10 +73,12 @@ export function renderUsageLine(ctx: RenderContext): string | null {
       usageBarEnabled,
       barWidth,
     });
-    return `${usageLabel} ${fiveHourPart} | ${sevenDayPart}`;
+    const syncSuffix7d = ctx.usageData.apiError === 'rate-limited' ? ` ${dim('(syncing...)')}` : '';
+    return `${usageLabel} ${fiveHourPart} | ${sevenDayPart}${syncSuffix7d}`;
   }
 
-  return `${usageLabel} ${fiveHourPart}`;
+  const syncingSuffix = ctx.usageData.apiError === 'rate-limited' ? ` ${dim('(syncing...)')}` : '';
+  return `${usageLabel} ${fiveHourPart}${syncingSuffix}`;
 }
 
 function formatUsagePercent(percent: number | null, colors?: RenderContext['config']['colors']): string {

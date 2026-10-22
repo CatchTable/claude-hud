@@ -55,7 +55,11 @@ export interface UsageData {
     sevenDay: number | null;
     fiveHourResetAt: Date | null;
     sevenDayResetAt: Date | null;
+    apiUnavailable?: boolean;
+    apiError?: string;
 }
+/** Rate limits from stdin — reuse in usage-api.ts */
+export type StdinRateLimits = NonNullable<StdinData['rate_limits']>;
 export interface MemoryInfo {
     totalBytes: number;
     usedBytes: number;
